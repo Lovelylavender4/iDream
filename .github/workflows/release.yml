@@ -1,0 +1,105 @@
+on:
+  release:
+    types:
+      - published
+  
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: xmake-io/github-action-setup-xmake@v1
+      
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/.xmake
+          key: xmake-${{ hashFiles('xmake.lua') }}
+          restore-keys: |
+            xmake-
+
+      - run: |
+          xmake repo -u
+
+      - run: |
+          xmake f -a x64 -m release -p windows -v -y
+
+      - run: |
+          xmake -v -w -y
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-windows-x64-${{ github.sha }}
+          path: |
+            build/windows/x64/release/
+
+  update-release-notes:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release stuff (CHANGELOG.md, etc.)
+        run: |
+          npm i -g keep-a-changelog
+          python scripts/validate_release.py --tag ${{ github.event.release.tag_name }}
+
+      - id: extract-release-notes
+        uses: ffurrer2/extract-release-notes@v2
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          body: |-
+            ${{ steps.extract-release-notes.outputs.release_notes }}
+
+            | File | SHA256 |
+            | ---- | ------ |
+
+
+  upload-to-release:
+    needs:
+      - build
+      - update-release-notes
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        header-only:
+          - true
+          - false
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          mkdir artifact/
+
+      - if: ${{ matrix.header-only == true }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-windows-x64-${{ github.sha }}
+          path: artifact/bin/
+
+      - run: |
+          cp README.md artifact/
+
+      - run: |
+          cp -r iDream/include/ artifact/
+
+      - run: |
+          zip -r ../${{ github.event.repository.name }}${{ matrix.header-only == true && '-test' || '-header-only' }}-windows-x64.zip *
+        working-directory: artifact
+        
+      - id: calculate-sha256
+        run: |
+          echo sha256=$(sha256sum ${{ github.event.repository.name }}${{ matrix.header-only == true && '-test' || '-header-only' }}-windows-x64.zip | awk '{print $1}') >> $GITHUB_OUTPUT
+          
+      - uses: softprops/action-gh-release@v1
+        with:
+          append_body: true
+          body: |-
+            | ${{ github.event.repository.name }}${{ matrix.header-only == true && '-test' || '-header-only' }}-windows-x64.zip | ${{ steps.calculate-sha256.outputs.sha256 }} |
+          files: |
+            ${{ github.event.repository.name }}${{ matrix.header-only == true && '-test' || '-header-only' }}-windows-x64.zip
